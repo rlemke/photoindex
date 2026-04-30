@@ -8,6 +8,7 @@ dependencies = [
     "pillow-heif>=0.18",
     "imagehash>=4.3",
     "click>=8.1",
+    "numpy>=2.0",
 ]
 
 [project.optional-dependencies]

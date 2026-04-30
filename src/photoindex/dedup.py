@@ -28,37 +28,49 @@ def find_near_pairs(
 ) -> FindDupsStats:
     """Recompute similar_pairs from scratch using phash hamming distance.
 
+    Uses numpy uint64 + np.bitwise_count for vectorized popcount, which is
+    ~100x faster than per-pair Python at the scales we hit (200k+ photos).
     All pairs at phash distance <= candidate_threshold are written.
-    The caller can split confirmed vs candidate by phash_distance at query time.
     """
+    import numpy as np
+
     rows = conn.execute(
         "SELECT id, phash, dhash FROM photos WHERE phash IS NOT NULL ORDER BY id"
     ).fetchall()
+    n = len(rows)
 
-    ids = [r["id"] for r in rows]
-    phashes = [int(r["phash"], 16) for r in rows]
-    dhashes = [int(r["dhash"], 16) if r["dhash"] else None for r in rows]
-    n = len(ids)
+    ids = np.fromiter((r["id"] for r in rows), dtype=np.int64, count=n)
+    phashes = np.fromiter(
+        (int(r["phash"], 16) for r in rows), dtype=np.uint64, count=n
+    )
+    dhashes = np.zeros(n, dtype=np.uint64)
+    has_dhash = np.zeros(n, dtype=bool)
+    for i, r in enumerate(rows):
+        if r["dhash"]:
+            dhashes[i] = int(r["dhash"], 16)
+            has_dhash[i] = True
 
     pairs_to_insert: list[tuple[int, int, int, int | None]] = []
-    pairs_examined = 0
+    pairs_examined = n * (n - 1) // 2
     confirmed = 0
     candidate = 0
 
-    for i in range(n):
-        pi = phashes[i]
-        di = dhashes[i]
-        ai = ids[i]
-        for j in range(i + 1, n):
-            pairs_examined += 1
-            d_p = (pi ^ phashes[j]).bit_count()
-            if d_p > candidate_threshold:
-                continue
-            d_d = None
-            if di is not None and dhashes[j] is not None:
-                d_d = (di ^ dhashes[j]).bit_count()
-            pairs_to_insert.append((ai, ids[j], d_p, d_d))
-            if d_p <= confirmed_threshold:
+    for i in range(n - 1):
+        diffs = phashes[i + 1 :] ^ phashes[i]
+        d_p = np.bitwise_count(diffs)
+        close = np.flatnonzero(d_p <= candidate_threshold)
+        if close.size == 0:
+            continue
+        ai = int(ids[i])
+        i_has_d = has_dhash[i]
+        for k in close.tolist():
+            j = i + 1 + k
+            d_p_val = int(d_p[k])
+            d_d_val: int | None = None
+            if i_has_d and has_dhash[j]:
+                d_d_val = int(np.bitwise_count(dhashes[i] ^ dhashes[j]))
+            pairs_to_insert.append((ai, int(ids[j]), d_p_val, d_d_val))
+            if d_p_val <= confirmed_threshold:
                 confirmed += 1
             else:
                 candidate += 1

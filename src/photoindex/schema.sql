@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS similar_pairs (
     CHECK (photo_a_id < photo_b_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_similar_pairs_phash_distance
+    ON similar_pairs(phash_distance);
+
 -- Non-dedup linkages, e.g. RAW+JPEG sidecar pairs that should travel together.
 CREATE TABLE IF NOT EXISTS pair_links (
     photo_a_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,

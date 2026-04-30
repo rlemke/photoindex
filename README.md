@@ -346,6 +346,7 @@ Walks `PATH` recursively and indexes every recognized photo or video. The combin
 - `--disk-label` is the *logical* name of the source disk (typically the volume name). Use the same label every time you scan that disk; pick a different label for a different disk.
 - `--disk-prefix` is needed when you scan a *subfolder* of a disk: it gets prepended to recorded paths, so a later scan of a sibling subfolder under the same `--disk-label` doesn't collide. Example: `scan /Volumes/D1/Pictures --disk-label D1 --disk-prefix Pictures` records paths as `Pictures/...`.
 - Unsupported file types (`.html`, `.ini`, `.db`, `.dll`, etc.) are silently skipped.
+- Files whose names start with `.` are also skipped. This catches macOS metadata (`.DS_Store`, `._*` AppleDouble files) and Picasa-style thumbnail caches in `.tb/` subdirectories — neither of which are user content.
 - Sources are opened read-only; `scan` never writes to them.
 - Periodic commits every 100 files mean an interruption only loses the last few files of progress.
 
