@@ -1,0 +1,15 @@
+pyproject.toml
+src/photoindex/__init__.py
+src/photoindex/cli.py
+src/photoindex/db.py
+src/photoindex/exif.py
+src/photoindex/filetypes.py
+src/photoindex/hashing.py
+src/photoindex/scanner.py
+src/photoindex/schema.sql
+src/photoindex.egg-info/PKG-INFO
+src/photoindex.egg-info/SOURCES.txt
+src/photoindex.egg-info/dependency_links.txt
+src/photoindex.egg-info/entry_points.txt
+src/photoindex.egg-info/requires.txt
+src/photoindex.egg-info/top_level.txt

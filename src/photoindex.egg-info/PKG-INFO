@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: photoindex
+Version: 0.1.0
+Summary: Index and deduplicate photos across multiple (often offline) external disks.
+Requires-Python: >=3.11
+Requires-Dist: Pillow>=10.3
+Requires-Dist: pillow-heif>=0.18
+Requires-Dist: imagehash>=4.3
+Requires-Dist: click>=8.1
+Provides-Extra: raw
+Requires-Dist: rawpy>=0.21; extra == "raw"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

@@ -1,0 +1,2 @@
+[console_scripts]
+photoindex = photoindex.cli:main

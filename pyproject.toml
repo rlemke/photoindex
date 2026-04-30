@@ -1,0 +1,28 @@
+[project]
+name = "photoindex"
+version = "0.1.0"
+description = "Index and deduplicate photos across multiple (often offline) external disks."
+requires-python = ">=3.11"
+dependencies = [
+    "Pillow>=10.3",
+    "pillow-heif>=0.18",
+    "imagehash>=4.3",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+raw = ["rawpy>=0.21"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+photoindex = "photoindex.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+photoindex = ["schema.sql"]

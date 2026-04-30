@@ -1,0 +1,10 @@
+Pillow>=10.3
+pillow-heif>=0.18
+imagehash>=4.3
+click>=8.1
+
+[dev]
+pytest>=8.0
+
+[raw]
+rawpy>=0.21
