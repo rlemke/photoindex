@@ -21,7 +21,141 @@ The starting point is a typical "decades of photos spread across many external d
 4. **Produce a full audit trail.** Every copy is recorded with source disk, source path, destination path, and SHA-256 verified at the destination.
 5. **Stay reviewable.** Borderline near-duplicates are surfaced for human review rather than silently auto-merged. Manual decisions persist across re-runs.
 
-## Architecture
+## How a copy to destination works
+
+This is the headline workflow: take many overlapping disks of photos, end up with one consolidated copy on a destination disk, with no duplicates and no overwritten files. **It's a two-step process — building a plan, then executing it — so you can review what's about to happen before any disk I/O.**
+
+### Step 1: build a plan (no files copied yet)
+
+```bash
+photoindex plan --plan-id v1 --layout by-date \
+    --dest /Volumes/Consolidated --max-distance 8
+```
+
+The planner does this in the index only:
+
+1. Walk every photo in `photos`.
+2. For each photo, decide whether it's a **canonical** (the keeper of its dedup group) or a **drop** (a near-duplicate of a canonical at perceptual hash distance ≤ `--max-distance`).
+3. For each canonical, derive a destination *relative* path from `--layout`.
+4. Detect any filename collisions the chosen layout would produce and append `(2)`, `(3)`, … suffixes; record the reason.
+5. Write one row per canonical into `copy_plan`, plus one row into `plan_runs` recording the plan parameters.
+
+No bytes are copied yet. You can inspect the plan before committing:
+
+```bash
+photoindex plan-show --plan-id v1 --limit 30
+```
+
+### Step 2: execute the plan (the actual copy)
+
+```bash
+photoindex execute-plan --plan-id v1 \
+    --mount Photos_03=/Volumes/Photos_03 \
+    --mount "Toshiba_Ext=/Volumes/TOSHIBA EXT" \
+    --yes
+```
+
+For every row in `copy_plan` that doesn't already have a verified entry in `copy_log`:
+
+1. Resolve the source absolute path: `<mount-for-disk_label> + <source-relative-path>`.
+2. Open the source **read-only** and stream it to the destination, computing SHA-256 in-flight from the bytes being written.
+3. Compare the streamed SHA to the SHA recorded when the photo was scanned. If they differ, the partial destination file is unlinked and the row is reported as `sha_mismatch`.
+4. On success, preserve the source's `mtime` and mode at the destination via `shutil.copystat`.
+5. Insert one row into `copy_log` recording (source disk label + source relative path) → (destination absolute path) with `dest_sha256` and `verified=1`.
+
+After this completes, every file under `--dest` has a verified SHA-256 matching the source, and `copy_log` is the **authoritative ledger** that lets you trace any destination file back to its origin disk and path.
+
+### What "non-duplicate" means here
+
+A non-duplicate file at the destination is a **canonical** of its dedup group. The dedup engine groups photos that are either:
+
+- Byte-identical (same SHA-256) — usually exact copies across disks.
+- Visually identical at perceptual hash distance ≤ `--max-distance` (default 8) — re-saves, format conversions, social-media re-uploads, etc.
+
+Within each group the keeper is picked deterministically: **highest pixel count → largest file size → EXIF datetime present → earliest `file_mtime` → lowest internal photo id**. Group members that are *not* the canonical are simply absent from the plan — never copied, but also never deleted from the source. They stay on their source disks untouched. The plan's audit trail tells you which canonical represents each dropped duplicate.
+
+Photos with no near-duplicates ("singletons") are also canonicals — they're always copied.
+
+### Resumability and idempotency
+
+`execute-plan` is safe to run repeatedly with the same `--plan-id`:
+
+- Rows already in `copy_log` with `verified=1` are skipped.
+- If a destination file already exists with the **right** SHA-256 (e.g. from an interrupted prior run), it's re-logged into `copy_log` without re-copying — surfaced as `dest_match`.
+- If a destination file already exists with a **wrong** SHA, the executor refuses to overwrite — surfaced as `dest_mismatch`. You decide manually.
+
+So if you Ctrl-C a copy halfway through, just rerun `execute-plan --plan-id <same>` and it picks up where it left off.
+
+### Adding more disks later — the `--plan-id` lifecycle
+
+A plan is **immutable once executed**. The planner refuses to rebuild a `--plan-id` that has rows in `copy_log`, because doing so would orphan the audit trail. The pattern when adding a new disk is therefore:
+
+1. Scan the new disk:
+   ```bash
+   photoindex scan /Volumes/NewDisk --disk-label NewDisk
+   ```
+2. Re-run dedup so the new photos cluster against everything already indexed:
+   ```bash
+   photoindex find-dups
+   ```
+3. Build a *new* plan with a *new* `--plan-id` (e.g. `v2`, `v3`, `final`):
+   ```bash
+   photoindex plan --plan-id v2 --layout by-date \
+       --dest /Volumes/Consolidated --max-distance 8
+   ```
+4. Execute it:
+   ```bash
+   photoindex execute-plan --plan-id v2 --mount …
+   ```
+   Destination files that were `v1` canonicals and *still are* `v2` canonicals get `dest_match` (no re-copy). Genuinely new canonicals are streamed fresh. Files that were `v1` canonicals but for which `v2` picked a *different* (e.g. higher-resolution) canonical now exist at the destination but aren't in `v2`'s ledger — these are **orphans**.
+5. Optionally remove the orphans:
+   ```bash
+   photoindex cleanup-orphans --plan-id v2 --apply
+   ```
+
+The destination grows monotonically (until you cleanup) as new disks are added to the index.
+
+### What the destination looks like
+
+The `--layout` flag at plan time controls the destination tree shape.
+
+**`mirror` (default)** — preserves source folder structure under each disk's label. Collision-free by construction:
+
+```
+/Volumes/Consolidated/
+├── Photos_03/
+│   ├── Lindas_Pictures/
+│   │   └── 2010-01/IMG_0123.JPG
+│   └── Ralphs_Pictures/
+│       └── 1999_TonyaAaronWedding/DSC_0001.JPG
+└── Toshiba_Ext/
+    └── Family_Photos/Lemke/…
+```
+
+**`by-date`** — organizes everything into year/month folders by EXIF datetime:
+
+```
+/Volumes/Consolidated/
+├── 1999/
+│   ├── 1999-07/DSC_0001.JPG
+│   └── 1999_TonyaAaronWedding/extra.jpg     # source-folder fallback
+├── 2010/
+│   ├── 2010-01/IMG_0123.JPG
+│   └── 2010-02/IMG_0124 (2).JPG             # collision-renamed
+├── …
+└── unsorted/
+    └── <source-folder>/IMG_0001.JPG          # no EXIF, no year-in-folder
+```
+
+The `by-date` resolution chain for each photo is:
+
+1. EXIF datetime present and in 1980–2039 → `<YYYY>/<YYYY>-<MM>/<filename>`.
+2. Source folder name contains a 4-digit year → `<YYYY>/<source-folder>/<filename>`.
+3. Otherwise → `unsorted/<source-folder>/<filename>`.
+
+Filename collisions in any of these buckets get an auto-incrementing `(N)` suffix and the reason is recorded in `copy_plan.rename_reason`.
+
+## Pipeline at a glance
 
 The pipeline has four phases, each backed by an SQLite table or set of tables:
 
