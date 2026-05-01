@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -10,6 +11,16 @@ from .db import now_iso
 
 _VALID_LAYOUTS = ("mirror", "by-date")
 _YEAR_RE = re.compile(r"(19[8-9]\d|20[0-3]\d)")  # 1980..2039 anywhere in a path component
+_MAX_PATH_COMPONENT = 200  # macOS NAME_MAX is 255; leave headroom for filename appended after
+
+
+def _safe_path_component(name: str, max_len: int = _MAX_PATH_COMPONENT) -> str:
+    """Truncate an oversize path component to fit the filesystem's NAME_MAX,
+    appending a short SHA1 hash so two long names that share a prefix don't collide."""
+    if len(name) <= max_len:
+        return name
+    h = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return name[: max_len - 9] + "_" + h
 
 
 def _exif_year_month(exif_iso: str | None) -> tuple[int, int] | None:
@@ -35,19 +46,20 @@ def _year_from_folder_path(rel_path: str) -> int | None:
 
 
 def _by_date_dest(p: sqlite3.Row) -> str:
+    filename = _safe_path_component(p["filename"])
     ym = _exif_year_month(p["exif_datetime"])
     if ym:
         y, m = ym
-        return f"{y}/{y}-{m:02d}/{p['filename']}"
+        return f"{y}/{y}-{m:02d}/{filename}"
 
     year = _year_from_folder_path(p["relative_path"])
     parent = p["relative_path"].rsplit("/", 1)[0] if "/" in p["relative_path"] else ""
-    folder_label = parent.split("/")[-1] if parent else "_root"
+    folder_label = _safe_path_component(parent.split("/")[-1] if parent else "_root")
     if year is not None:
-        return f"{year}/{folder_label}/{p['filename']}"
+        return f"{year}/{folder_label}/{filename}"
 
-    flat_parent = parent.replace("/", "_") or "_root"
-    return f"unsorted/{flat_parent}/{p['filename']}"
+    flat_parent = _safe_path_component(parent.replace("/", "_") or "_root")
+    return f"unsorted/{flat_parent}/{filename}"
 
 
 def _resolve_collision(dest: str, used: set[str]) -> tuple[str, str | None]:
