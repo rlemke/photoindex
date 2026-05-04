@@ -511,6 +511,8 @@ An earlier implementation used connected-components on `similar_pairs` for group
 
 That's fine — the natural key is `(disk_id, relative_path)`. Only same-disk same-path collisions are forbidden, which happens automatically because each disk has one `disk_id`.
 
-## License & status
+## License
 
-This is a personal-project tool. No license declared.
+Copyright 2026 Ralph Lemke.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text. Source files carry an SPDX header (`SPDX-License-Identifier: Apache-2.0`) for machine-readable license tracking.

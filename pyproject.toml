@@ -3,6 +3,9 @@ name = "photoindex"
 version = "0.1.0"
 description = "Index and deduplicate photos across multiple (often offline) external disks."
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Ralph Lemke"}]
 dependencies = [
     "Pillow>=10.3",
     "pillow-heif>=0.18",
@@ -19,7 +22,7 @@ dev = ["pytest>=8.0"]
 photoindex = "photoindex.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
