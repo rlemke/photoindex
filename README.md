@@ -153,7 +153,18 @@ The `by-date` resolution chain for each photo is:
 2. Source folder name contains a 4-digit year → `<YYYY>/<source-folder>/<filename>`.
 3. Otherwise → `unsorted/<source-folder>/<filename>`.
 
-Filename collisions in any of these buckets get an auto-incrementing `(N)` suffix and the reason is recorded in `copy_plan.rename_reason`.
+Filename collisions in `mirror` and `by-date` buckets get an auto-incrementing `(N)` suffix and the reason is recorded in `copy_plan.rename_reason`.
+
+**`flat`** — every file lands directly in the destination root, no subdirectories. Designed for "list of photos to act on next" use cases (e.g. an unsorted "missing" pile). Filename collisions get an `_NN` suffix:
+
+```
+/Volumes/Consolidated/missing/
+├── IMG_0123.JPG
+├── IMG_0123_01.JPG       # second photo also named IMG_0123.JPG, different content
+├── IMG_0123_02.JPG
+├── DSC_0001.NEF
+└── …
+```
 
 ## Pipeline at a glance
 
@@ -247,6 +258,49 @@ photoindex cleanup-orphans --plan-id final --apply
 ```
 
 The default index path is `~/.photoindex/index.sqlite`. Override with `--db <path>` on any command. The default `--plan-id` is `default`.
+
+## Comparing against an external reference (e.g. Google Photos)
+
+Once your disks are deduped and copied, a common follow-up question is: *what's on my disks that some external archive (a Google Photos export, an iCloud download, a friend's drive) doesn't already have?* The pipeline supports this directly — no special mode, just two extra steps after the main run.
+
+The idea: scan the external archive in as just another logical disk, then build a plan that excludes anything matching it.
+
+```bash
+# 0. (one-time) extract the reference archive somewhere readable.
+#    Google Takeout: each .zip merges cleanly under a shared root.
+unzip -q '*.zip' -d /Volumes/data_2026/google_takeout
+
+# 1. Index the reference like any other disk.
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite scan \
+    /Volumes/data_2026/google_takeout/photos \
+    --disk-label Google_Photos
+
+# 2. Re-run find-dups so similar_pairs covers the new disk.
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite find-dups
+
+# 3. Build a "missing" plan that drops anything matching Google_Photos.
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite plan \
+    --dest /Volumes/data_2026/missing \
+    --plan-id missing \
+    --layout flat \
+    --exclude-matches-disk Google_Photos
+
+# 4. Review the plan, then execute + verify.
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite plan-show --plan-id missing
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite execute-plan --plan-id missing --yes
+photoindex --db /Volumes/data_2026/.photoindex/index.sqlite verify-copies --plan-id missing
+```
+
+What `--exclude-matches-disk Google_Photos` actually does: drops any source photo that is *on* Google_Photos, OR has a SHA-256 match on Google_Photos, OR has a perceptual-hash distance ≤ `--max-distance` to any photo on Google_Photos. Videos match by SHA-256 only (they have no phash). The result is the set of photos your disks have that the reference does not.
+
+Layout choice for the missing pile:
+
+- `--layout flat` — every missing file in one directory, with `_NN` suffix on filename collisions. Easy to scroll through, easy to feed to a downstream tool.
+- `--layout mirror` — keeps each missing file under `<disk_label>/<original/path>`. Useful if you want to know *where* a missing photo originally lived (for re-upload, manual review, or selective deletion at the source).
+
+You can build both — different `--plan-id` and `--dest` per run; the index keeps independent `copy_log` ledgers per plan.
+
+After you're done, the reference archive's *files* are no longer needed (the index already has its sha256 + phash). Free the space with `rm -rf /Volumes/data_2026/google_takeout/`.
 
 ## Tips & gotchas
 
@@ -384,7 +438,7 @@ Records a `confirmed_dup` decision: this pair will be grouped together by `group
 
 Records a `confirmed_distinct` decision: this pair will never be grouped, even if phash distance falls below the threshold. Useful for two visually-similar photos that aren't actually the same content.
 
-### `photoindex plan --dest ROOT [--plan-id NAME] [--max-distance N] [--layout mirror|by-date]`
+### `photoindex plan --dest ROOT [--plan-id NAME] [--max-distance N] [--layout mirror|by-date|flat] [--exclude-matches-disk LABEL ...]`
 
 Builds a fresh copy plan in `copy_plan` + `plan_runs`. For each unique photo:
 
@@ -396,6 +450,9 @@ Layouts:
 
 - `mirror` (default) — `<disk_label>/<source_relative_path>`. No filename collisions possible; preserves source folder structure.
 - `by-date` — `<YYYY>/<YYYY>-<MM>/<filename>` from EXIF datetime. Falls back to `<YYYY>/<source_folder>/<filename>` if the source folder name contains a year, else `unsorted/<source_folder>/<filename>`. Filename collisions get an auto `(N)` suffix and the reason is recorded in `copy_plan.rename_reason`.
+- `flat` — `<filename>` directly under the destination root, no subdirectories. Filename collisions get an `_NN` suffix (`IMG_1234.JPG` → `IMG_1234_01.JPG`).
+
+`--exclude-matches-disk LABEL` (repeatable) drops from the plan any photo that is on `LABEL`, OR whose SHA-256 matches any photo on `LABEL`, OR whose phash is within `--max-distance` of a photo on `LABEL`. Videos (no phash) match by SHA-256 only. Use case: produce a "missing" plan against an external reference scanned in as its own logical disk — see *Comparing against an external reference (e.g. Google Photos)* below.
 
 Refuses to rebuild a `--plan-id` that has already been executed (would orphan the `copy_log`). Use a different `--plan-id`.
 

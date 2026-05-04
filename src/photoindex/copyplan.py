@@ -9,7 +9,7 @@ from datetime import datetime
 from . import dedup
 from .db import now_iso
 
-_VALID_LAYOUTS = ("mirror", "by-date")
+_VALID_LAYOUTS = ("mirror", "by-date", "flat")
 _YEAR_RE = re.compile(r"(19[8-9]\d|20[0-3]\d)")  # 1980..2039 anywhere in a path component
 _MAX_PATH_COMPONENT = 200  # macOS NAME_MAX is 255; leave headroom for filename appended after
 
@@ -45,6 +45,10 @@ def _year_from_folder_path(rel_path: str) -> int | None:
     return None
 
 
+def _flat_dest(p: sqlite3.Row) -> str:
+    return _safe_path_component(p["filename"])
+
+
 def _by_date_dest(p: sqlite3.Row) -> str:
     filename = _safe_path_component(p["filename"])
     ym = _exif_year_month(p["exif_datetime"])
@@ -62,7 +66,9 @@ def _by_date_dest(p: sqlite3.Row) -> str:
     return f"unsorted/{flat_parent}/{filename}"
 
 
-def _resolve_collision(dest: str, used: set[str]) -> tuple[str, str | None]:
+def _resolve_collision(
+    dest: str, used: set[str], style: str = "paren"
+) -> tuple[str, str | None]:
     if dest not in used:
         return dest, None
     head, _, tail = dest.rpartition("/")
@@ -71,9 +77,12 @@ def _resolve_collision(dest: str, used: set[str]) -> tuple[str, str | None]:
         ext = "." + ext
     else:
         stem, ext = tail, ""
-    n = 2
+    n = 1 if style == "underscore" else 2
     while True:
-        candidate_tail = f"{stem} ({n}){ext}"
+        if style == "underscore":
+            candidate_tail = f"{stem}_{n:02d}{ext}"
+        else:
+            candidate_tail = f"{stem} ({n}){ext}"
         candidate = f"{head}/{candidate_tail}" if head else candidate_tail
         if candidate not in used:
             return candidate, f"collision: original was {dest}"
@@ -90,6 +99,7 @@ class BuildStats:
     plan_size: int
     dropped_phash: int
     dropped_sha_only: int
+    dropped_excluded: int
     estimated_bytes: int
 
 
@@ -99,12 +109,12 @@ def build_plan(
     dest_root: str,
     max_distance: int = 8,
     layout: str = "mirror",
+    exclude_disk_labels: list[str] | None = None,
 ) -> BuildStats:
     """Build a fresh copy plan in copy_plan / plan_runs.
 
     For each "unique" photo in the index, write one copy_plan row with
-    `dest_relative_path = "<disk_label>/<source_relative_path>"`. Uniqueness
-    is decided by:
+    `dest_relative_path` derived from `layout`. Uniqueness is decided by:
 
     * For images with a perceptual hash: the canonical of each near-dup
       group at phash distance <= max_distance is kept; the other group
@@ -112,6 +122,12 @@ def build_plan(
     * For files without a perceptual hash (e.g. video): the first instance
       of each SHA-256 is kept.
     * Photos that aren't part of any group are kept as singletons.
+
+    If `exclude_disk_labels` is given, drop any photo whose source disk
+    is on that list, OR whose SHA-256 matches any photo on those disks,
+    OR whose phash is within `max_distance` of any photo on those disks.
+    Use case: produce a "missing" plan against an external reference (e.g.
+    a Google Photos export) — the result is everything not already there.
 
     Idempotent: re-running with the same plan_run_id replaces the prior plan.
     """
@@ -139,6 +155,47 @@ def build_plan(
         # We still allow it; the caller surfaces the warning.
         pass
 
+    excluded_disk_ids: set[int] = set()
+    excluded_shas: set[str] = set()
+    excluded_phash_match_ids: set[int] = set()
+    if exclude_disk_labels:
+        placeholders = ",".join("?" * len(exclude_disk_labels))
+        rows = conn.execute(
+            f"SELECT id, label FROM disks WHERE label IN ({placeholders})",
+            list(exclude_disk_labels),
+        ).fetchall()
+        found = {r["label"]: r["id"] for r in rows}
+        missing_labels = set(exclude_disk_labels) - set(found.keys())
+        if missing_labels:
+            raise ValueError(
+                f"unknown disk label(s) for exclusion: {sorted(missing_labels)}"
+            )
+        excluded_disk_ids = set(found.values())
+        ids_csv = ",".join(str(i) for i in excluded_disk_ids)
+        excluded_shas = {
+            r["sha256"]
+            for r in conn.execute(
+                f"SELECT DISTINCT sha256 FROM photos WHERE disk_id IN ({ids_csv})"
+            )
+        }
+        excluded_phash_match_ids = {
+            r["photo_id"]
+            for r in conn.execute(
+                f"""
+                SELECT sp.photo_a_id AS photo_id
+                FROM similar_pairs sp
+                JOIN photos pb ON pb.id = sp.photo_b_id
+                WHERE pb.disk_id IN ({ids_csv}) AND sp.phash_distance <= ?
+                UNION
+                SELECT sp.photo_b_id AS photo_id
+                FROM similar_pairs sp
+                JOIN photos pa ON pa.id = sp.photo_a_id
+                WHERE pa.disk_id IN ({ids_csv}) AND sp.phash_distance <= ?
+                """,
+                (max_distance, max_distance),
+            )
+        }
+
     grouped_member_ids: set[int] = set()
     canonical_ids: set[int] = set()
     for group in dedup.find_groups(conn, max_distance=max_distance):
@@ -162,10 +219,20 @@ def build_plan(
     used_dest_paths: set[str] = set()
     dropped_phash = 0
     dropped_sha_only = 0
+    dropped_excluded = 0
     estimated_bytes = 0
+    collision_style = "underscore" if layout == "flat" else "paren"
 
     now = now_iso()
     for p in photos:
+        if (
+            p["disk_id"] in excluded_disk_ids
+            or p["sha256"] in excluded_shas
+            or p["id"] in excluded_phash_match_ids
+        ):
+            dropped_excluded += 1
+            continue
+
         if p["phash"] is not None:
             if p["id"] in grouped_member_ids and p["id"] not in canonical_ids:
                 dropped_phash += 1
@@ -178,9 +245,13 @@ def build_plan(
 
         if layout == "mirror":
             dest_base = f"{p['disk_label']}/{p['relative_path']}"
+        elif layout == "flat":
+            dest_base = _flat_dest(p)
         else:  # by-date
             dest_base = _by_date_dest(p)
-        dest, rename_reason = _resolve_collision(dest_base, used_dest_paths)
+        dest, rename_reason = _resolve_collision(
+            dest_base, used_dest_paths, style=collision_style
+        )
         used_dest_paths.add(dest)
         plan_rows.append((plan_run_id, p["id"], dest, rename_reason, now))
         estimated_bytes += p["file_size"]
@@ -213,6 +284,7 @@ def build_plan(
         plan_size=len(plan_rows),
         dropped_phash=dropped_phash,
         dropped_sha_only=dropped_sha_only,
+        dropped_excluded=dropped_excluded,
         estimated_bytes=estimated_bytes,
     )
 

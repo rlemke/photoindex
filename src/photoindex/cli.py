@@ -198,14 +198,31 @@ def _format_bytes(n: int) -> str:
 )
 @click.option(
     "--layout",
-    type=click.Choice(["mirror", "by-date"]),
+    type=click.Choice(["mirror", "by-date", "flat"]),
     default="mirror",
     show_default=True,
-    help="mirror=preserve source paths under disk_label; by-date=group into YYYY/YYYY-MM/.",
+    help="mirror=preserve source paths under disk_label; "
+    "by-date=group into YYYY/YYYY-MM/; "
+    "flat=all files in dest_root, _NN suffix on collisions.",
+)
+@click.option(
+    "--exclude-matches-disk",
+    "exclude_disk_labels",
+    multiple=True,
+    metavar="LABEL",
+    help="Drop any photo whose source disk is LABEL, OR whose SHA matches a "
+    "photo on LABEL, OR whose phash is within --max-distance of a photo on "
+    "LABEL. Repeatable. Use case: --exclude-matches-disk Google_Photos to "
+    "produce a 'missing' plan.",
 )
 @click.pass_context
 def plan_cmd(
-    ctx: click.Context, dest_root: Path, plan_run_id: str, max_distance: int, layout: str
+    ctx: click.Context,
+    dest_root: Path,
+    plan_run_id: str,
+    max_distance: int,
+    layout: str,
+    exclude_disk_labels: tuple[str, ...],
 ) -> None:
     """Build a dry-run copy plan from the current index."""
     conn = db.connect(ctx.obj["db_path"])
@@ -224,8 +241,12 @@ def plan_cmd(
             dest_root=str(dest_root),
             max_distance=max_distance,
             layout=layout,
+            exclude_disk_labels=list(exclude_disk_labels) or None,
         )
     except copyplan.PlanAlreadyExecutedError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        ctx.exit(1)
+    except ValueError as e:
         click.echo(f"ERROR: {e}", err=True)
         ctx.exit(1)
     click.echo(f"Plan '{plan_run_id}' built.")
@@ -233,6 +254,11 @@ def plan_cmd(
     click.echo(f"  to copy:                {stats.plan_size}")
     click.echo(f"  dropped (phash dedup):  {stats.dropped_phash}")
     click.echo(f"  dropped (sha-only):     {stats.dropped_sha_only}")
+    if exclude_disk_labels:
+        click.echo(
+            f"  dropped (excluded):     {stats.dropped_excluded}  "
+            f"(matches {', '.join(exclude_disk_labels)})"
+        )
     click.echo(f"  estimated bytes:        {_format_bytes(stats.estimated_bytes)}")
     click.echo(f"  destination root:       {dest_root}")
 
