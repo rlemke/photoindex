@@ -1,5 +1,7 @@
 # photoindex
 
+> This is another project built entirely by Claude. 
+
 Index, deduplicate, and consolidate photos across multiple external disks — including disks that aren't connected at the same time.
 
 ## Why this exists
@@ -8,7 +10,7 @@ The starting point is a typical "decades of photos spread across many external d
 
 - The same photo lives on multiple disks under different filenames (e.g. `IMG_0571.JPG` on one disk, `CB6C8194-7952-46D9-A4AC-C7827387A457.JPG` on another) and at different resolutions.
 - Different photos sometimes share the same filename across folders (so naive merging would silently overwrite content).
-- Some folders have meaningful names (`1999_TonyaAaronWedding`); many don't (Facebook hashes, `IMG_0001.JPG`, etc.).
+- Some folders have meaningful names (`1999_TamAndJohnWedding`); many don't (Facebook hashes, `IMG_0001.JPG`, etc.).
 - The disks aren't all online at once, so any "did I already see this photo?" decision has to be made from an index — not from re-reading the file.
 
 `photoindex` builds a single SQLite index over every disk you've scanned, identifies exact and near-duplicate photos using SHA-256 + perceptual hashing, and produces a verified, collision-safe copy plan to consolidate everything onto one destination disk.
